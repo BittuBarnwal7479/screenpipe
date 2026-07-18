@@ -186,7 +186,14 @@ impl AudioStream {
                     && device.name == MACOS_OUTPUT_AUDIO_DEVICE_NAME
                     && super::process_tap::is_process_tap_available()
             };
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
+            let use_process_tap = {
+                use super::device::DeviceType;
+                device.device_type == DeviceType::Output
+                    && super::process_tap::has_configured_audio_exclusion()
+                    && super::process_tap::is_process_tap_available()
+            };
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             let use_process_tap = false;
 
             // Per-process meeting tap: virtual device backed by
@@ -220,7 +227,7 @@ impl AudioStream {
                     unreachable!()
                 }
             } else if use_process_tap {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 {
                     match super::process_tap::spawn_process_tap_capture(
                         tx.clone(),
@@ -249,7 +256,7 @@ impl AudioStream {
                         }
                     }
                 }
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 {
                     unreachable!()
                 }
