@@ -186,6 +186,12 @@ impl AudioStream {
                     && device.name == MACOS_OUTPUT_AUDIO_DEVICE_NAME
                     && super::process_tap::is_process_tap_available()
             };
+            // Windows: when an exclusion is configured, EVERY output-device
+            // stream becomes the same exclusion-aware capture (process-exclude
+            // loopback, or default-endpoint loopback while the excluded app is
+            // not running). A non-default output selection is superseded while
+            // an exclusion exists, and several enabled output devices will
+            // capture the same system mix.
             #[cfg(target_os = "windows")]
             let use_process_tap = {
                 use super::device::DeviceType;

@@ -81,10 +81,13 @@ pub fn read_audio_exclusions() -> Result<Vec<ExcludedApp>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("read {}: {e}", path.display())),
     };
+    // Tolerate a UTF-8 BOM: the file is hand-editable and Notepad saves
+    // "UTF-8 with BOM", which serde_json rejects.
+    let body = body.trim_start_matches('\u{feff}');
     if body.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let parsed: serde_json::Value = serde_json::from_str(&body)
+    let parsed: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| format!("invalid JSON in {}: {e}", path.display()))?;
     Ok(parse_excluded_apps(&parsed))
 }
@@ -321,6 +324,22 @@ mod tests {
             rt.block_on(write_audio_exclusions(apps.clone())).unwrap();
             assert_eq!(read_audio_exclusions().unwrap(), apps);
             std::fs::remove_file(&path).ok();
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn read_tolerates_utf8_bom() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            "\u{feff}{\"excluded_apps\": [{\"bundle_id\": \"com.ok\", \"name\": \"OK\"}]}",
+        )
+        .unwrap();
+        with_env(f.path().to_str().unwrap(), || {
+            let apps = read_audio_exclusions().unwrap();
+            assert_eq!(apps.len(), 1);
+            assert_eq!(apps[0].bundle_id, "com.ok");
         });
     }
 

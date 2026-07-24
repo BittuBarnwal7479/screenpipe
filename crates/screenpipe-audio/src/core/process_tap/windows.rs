@@ -33,7 +33,7 @@ use std::sync::{
     mpsc, Arc, Mutex, OnceLock,
 };
 use std::time::Duration;
-use sysinfo::{Pid, PidExt, ProcessExt, System, SystemExt};
+use sysinfo::{Pid, PidExt, ProcessExt, ProcessRefreshKind, System, SystemExt};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 use windows::core::{implement, IUnknown, Interface, HRESULT, PCWSTR, PWSTR};
@@ -208,7 +208,16 @@ fn exclusions_path() -> PathBuf {
 
 fn configured_executable_path() -> Option<PathBuf> {
     let body = std::fs::read_to_string(exclusions_path()).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&body).ok()?;
+    parse_exclusions_body(&body)
+}
+
+/// Parse the exclusions JSON body, tolerating a UTF-8 BOM. The file is
+/// documented as hand-editable and Notepad saves "UTF-8 with BOM", which
+/// serde_json rejects — without the strip the exclusion would be silently
+/// dropped and the app the user excluded would keep being recorded.
+fn parse_exclusions_body(body: &str) -> Option<PathBuf> {
+    let value: serde_json::Value =
+        serde_json::from_str(body.trim_start_matches('\u{feff}')).ok()?;
     parse_configured_executable_path(&value)
 }
 
@@ -237,16 +246,21 @@ fn normalized_windows_path(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
+// Runs on the capture thread every EXCLUSION_TARGET_POLL_INTERVAL, so it must
+// stay cheap: refresh process info only (no CPU/disk/user extras — the
+// `System::new_all` variant cost ~65ms per scan and stalled the WASAPI drain
+// for ~125ms per poll) and reuse one snapshot for both the path match and the
+// root walk.
 fn find_excluded_process_root(executable: &Path) -> Option<u32> {
     let expected = normalized_windows_path(executable);
-    let mut system = System::new_all();
-    system.refresh_processes();
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessRefreshKind::new());
     system
         .processes()
         .values()
         .filter(|process| normalized_windows_path(process.exe()) == expected)
         .min_by_key(|process| process.start_time())
-        .map(|process| resolve_target_root_pid(process.pid().as_u32()))
+        .map(|process| resolve_root_pid_in(&system, process.pid().as_u32()))
 }
 
 fn configured_exclusion_target() -> LoopbackTarget {
@@ -293,7 +307,7 @@ fn spawn_wasapi_loopback(
     let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<AudioStreamConfig>>(1);
     let initial_target = source.current_target();
     let label = initial_target.label();
-    let thread_label = label.clone();
+    let mut thread_label = label.clone();
 
     let handle = tokio::task::spawn_blocking(move || {
         let _com = match ComApartment::enter() {
@@ -361,6 +375,7 @@ fn spawn_wasapi_loopback(
             }
 
             target = source.current_target();
+            thread_label = target.label();
 
             drop(capture);
             let mut cooldown = if step == SupervisorStep::RebuildNow {
@@ -385,6 +400,7 @@ fn spawn_wasapi_loopback(
                 match unsafe { build_wasapi_capture(target) } {
                     Ok(new_capture) => {
                         capture = new_capture;
+                        info!("Windows WASAPI loopback rebuilt ({thread_label})");
                         rebuild_failures = 0;
                         if step == SupervisorStep::RebuildNow {
                             rebuild_streak = 0;
@@ -594,14 +610,12 @@ fn run_capture_loop(
 
     let mut last_target_poll = std::time::Instant::now();
     while !is_disconnected.load(Ordering::Relaxed) {
-        if last_target_poll.elapsed() >= EXCLUSION_TARGET_POLL_INTERVAL
-            && source.current_target() != active_target
-        {
-            info!("Windows audio exclusion target changed; rebuilding loopback ({label})");
-            return CaptureExit::TargetChanged;
-        }
         if last_target_poll.elapsed() >= EXCLUSION_TARGET_POLL_INTERVAL {
             last_target_poll = std::time::Instant::now();
+            if source.current_target() != active_target {
+                info!("Windows audio exclusion target changed; rebuilding loopback ({label})");
+                return CaptureExit::TargetChanged;
+            }
         }
         if target_watch.is_some_and(TargetProcessWatch::has_exited) {
             info!("Windows WASAPI loopback target exited ({label})");
@@ -897,9 +911,12 @@ fn select_target_root_pid(pids: &[i32]) -> Result<u32> {
 }
 
 pub(crate) fn resolve_target_root_pid(pid: u32) -> u32 {
-    let mut sys = System::new_all();
-    sys.refresh_processes();
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessRefreshKind::new());
+    resolve_root_pid_in(&sys, pid)
+}
 
+fn resolve_root_pid_in(sys: &System, pid: u32) -> u32 {
     let mut current = Pid::from_u32(pid);
     let mut root = pid;
     let mut seen = HashSet::new();
@@ -1057,6 +1074,15 @@ mod tests {
             "excluded_apps": [{ "bundle_id": "com.example.mac" }]
         });
         assert_eq!(parse_configured_executable_path(&mac_only), None);
+    }
+
+    #[test]
+    fn windows_exclusion_config_tolerates_utf8_bom() {
+        let body = "\u{feff}{\"excluded_apps\":[{\"bundle_id\":\"C:\\\\Apps\\\\Player.exe\"}]}";
+        assert_eq!(
+            parse_exclusions_body(body),
+            Some(PathBuf::from(r"C:\Apps\Player.exe"))
+        );
     }
 
     #[test]
