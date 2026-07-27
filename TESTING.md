@@ -17,6 +17,7 @@ commits: `e9c76934`, `9acdf850`
 
 - [ ] **window mode CSS restore** — In window mode (not fullscreen), verify that CSS styling is correct and as expected (e.g., no unexpected transparent panels).
 - [ ] **keyboard input in main window from tray** — Open the main window from the tray icon and immediately try typing. Verify that keyboard input works without requiring a click.
+- [ ] **Windows login autostart opens Home** — Enable auto-start, sign out, then sign back in on Windows (including a VM or remote desktop session). Home must be visible; the app must not appear to start tray-only.
 - [ ] **WKWebView keyboard focus recovery** — Interact with embedded web views (e.g., billing, help sections), then navigate back to other UI elements. Verify keyboard focus is correctly recovered by the WKWebView.
 
 

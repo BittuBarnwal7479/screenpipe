@@ -240,6 +240,14 @@ fn launched_from_autostart() -> bool {
     args_contain_autostart(std::env::args())
 }
 
+/// macOS login launches stay in the menu bar, but Windows must show Home.
+///
+/// A tray-only Windows launch is easy to mistake for a failed start, especially
+/// in remote desktop and VM sessions where the notification area may be hidden.
+fn should_skip_home_for_autostart(from_autostart: bool) -> bool {
+    from_autostart && !cfg!(target_os = "windows")
+}
+
 fn args_contain_autostart<I, S>(args: I) -> bool
 where
     I: IntoIterator<Item = S>,
@@ -1380,6 +1388,7 @@ async fn main() {
 
             let app_ui_hidden = crate::enterprise_policy::is_app_ui_hidden();
             let from_autostart = launched_from_autostart();
+            let skip_home_for_autostart = should_skip_home_for_autostart(from_autostart);
             // Enterprise hidden-UI deployments always run headless with the
             // recorder only, regardless of user settings or onboarding state.
             let headless_startup = app_ui_hidden
@@ -1391,8 +1400,10 @@ async fn main() {
                 headless_startup,
                 app_ui_hidden || (store.headless && store.headless_record_only),
             );
-            if from_autostart {
+            if skip_home_for_autostart {
                 info!("launched from OS autostart (--autostart); starting in background");
+            } else if from_autostart {
+                info!("launched from OS autostart (--autostart); showing Home on Windows");
             }
 
             // Show onboarding/home unless managed background agent, or login
@@ -1404,7 +1415,7 @@ async fn main() {
                 info!("headless: starting with UI dormant; use the tray to open screenpipe");
             } else if !onboarding_store.is_completed {
                 let _ = ShowRewindWindow::Onboarding.show(&app.handle());
-            } else if from_autostart {
+            } else if skip_home_for_autostart {
                 info!("autostart: skipping Home window (background login launch)");
             } else {
                 let _ = ShowRewindWindow::Home { page: None }.show(&app.handle());
@@ -2174,7 +2185,7 @@ async fn main() {
 
 #[cfg(test)]
 mod autostart_arg_tests {
-    use super::{args_contain_autostart, AUTOSTART_ARG};
+    use super::{args_contain_autostart, should_skip_home_for_autostart, AUTOSTART_ARG};
 
     #[test]
     fn detects_autostart_flag() {
@@ -2185,8 +2196,20 @@ mod autostart_arg_tests {
     #[test]
     fn ignores_unrelated_args() {
         assert!(!args_contain_autostart(["screenpipe"]));
-        assert!(!args_contain_autostart(["screenpipe", "--check-arc-automation"]));
+        assert!(!args_contain_autostart([
+            "screenpipe",
+            "--check-arc-automation"
+        ]));
         assert!(!args_contain_autostart(["screenpipe", "--autostarted"]));
+    }
+
+    #[test]
+    fn windows_autostart_keeps_home_visible() {
+        assert_eq!(
+            should_skip_home_for_autostart(true),
+            !cfg!(target_os = "windows")
+        );
+        assert!(!should_skip_home_for_autostart(false));
     }
 }
 
